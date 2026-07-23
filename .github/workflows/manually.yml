@@ -1,6 +1,16 @@
 name: Manually Build
 
 on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to build
+        required: true
+        default: 2.9.X
+      tag:
+        description: Release tag
+        required: true
+
   release:
     types: [created]
 
@@ -12,13 +22,6 @@ env:
     pack.png
     README.md
 
-  TARGET_BRANCHES: "main no_mixed_color_gc_plate resonatic_circuit gtnh_color"
-
-  ZIP_NAME_main: "Modernity-GTNH-${{ github.event.release.tag_name }}.zip"
-  ZIP_NAME_no_mixed_color_gc_plate: "Modernity-GTNH-NoMixinColorGCHeavyMaterial.zip"
-  ZIP_NAME_resonatic_circuit: "Modernity-GTNH-GTNLResonaticCircuit.zip"
-  ZIP_NAME_gtnh_color: "Modernity-GTNHAddon-GTNHColorComponent.zip"
-
   EXTERNAL_REPOS: |
     OutlinedOres-Modern=https://github.com/Ranzuu/OutlinedOres-Modern
     Just-Productive-Bees=https://github.com/DarkScorpyon/Just-Productive-Bees-
@@ -27,25 +30,21 @@ env:
     Modernity-GTNH-UI=https://github.com/ABKQPO/Modernity-GTNH-UI
     Modernity-GTNH-Dark-UI=https://github.com/ABKQPO/Modernity-GTNH-Dark-UI
 
-  EXTERNAL_ZIP_NAME_OutlinedOres_Modern: "Modernity-GTNH-OutlinedOres.zip"
-  EXTERNAL_ZIP_NAME_Just_Productive_Bees: "Modernity-GTNH-Just-Productive-Bees.zip"
-  EXTERNAL_ZIP_NAME_Just_Forestry_Bees: "Modernity-GTNH-Just-Forestry-Bees.zip"
-  EXTERNAL_ZIP_NAME_Medium_Large_Turbine: "Modernity-GTNHAddon-Medium-Large-Turbine.zip"
-  EXTERNAL_ZIP_NAME_Modernity_GTNH_UI: "Modernity-GTNH-UI.zip"
-  EXTERNAL_ZIP_NAME_Modernity_GTNH_Dark_UI: "Modernity-GTNH-Dark-UI.zip"
-
 jobs:
   package-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: read
+
+    env:
+      BUILD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.branch || github.event.repository.default_branch }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
     steps:
-      - name: Checkout full repository
+      - name: Checkout branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.BUILD_BRANCH }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -59,72 +58,50 @@ jobs:
           echo "TAG1=${tags[0]}" >> $GITHUB_ENV
           echo "TAG2=${tags[1]}" >> $GITHUB_ENV
 
-      - name: Build all branches
+      - name: Build ZIP
+        shell: bash
         run: |
-          TAG=${GITHUB_REF##*/}
-          for BRANCH in $TARGET_BRANCHES; do
-            echo "Checking out branch: $BRANCH"
-            git checkout "$BRANCH"
+          ZIP_NAME="Modernity-GTNH-${RELEASE_TAG}.zip"
 
-            VAR_NAME="ZIP_NAME_${BRANCH//-/_}"
-            ZIP_NAME=$(eval echo \$$VAR_NAME)
+          echo "Building branch: $BUILD_BRANCH"
+          echo "Output: $ZIP_NAME"
 
-            ZIP_NAME="${ZIP_NAME//\{TAG\}/$TAG}"
-            ZIP_NAME="${ZIP_NAME//\{SHA\}/${GITHUB_SHA::7}}"
+          rm -rf zip-root
+          mkdir zip-root
 
-            echo "Building ZIP for branch $BRANCH: $ZIP_NAME"
-
-            rm -rf zip-root
-            mkdir zip-root
-            for path in $INCLUDE_PATHS; do
-              [ -e "$path" ] && cp -r --parents "$path" zip-root/
-            done
-
-            cd zip-root
-            zip -r "../$ZIP_NAME" ./
-            cd ..
+          for path in $INCLUDE_PATHS; do
+            [ -e "$path" ] && cp -r --parents "$path" zip-root/
           done
-        shell: bash
 
-      - name: Download and package external repositories
-        run: |
-          mkdir external-zips
-          while IFS== read -r NAME URL; do
-            [ -z "$NAME" ] && continue
-            SAFE_NAME="${NAME//-/_}"
-            ZIP_VAR="EXTERNAL_ZIP_NAME_${SAFE_NAME}"
-            ZIP_NAME=$(eval echo \$$ZIP_VAR)
-
-            echo "Cloning $URL as $NAME ..."
-            git clone --depth=1 "$URL" "$NAME"
-
-            ZIP_DIR="external-zips/${NAME}-zip-root"
-            mkdir -p "$ZIP_DIR"
-
-            for path in $INCLUDE_PATHS; do
-              [ -e "$NAME/$path" ] && mkdir -p "$(dirname "$ZIP_DIR/$path")" && cp -r "$NAME/$path" "$ZIP_DIR/$path"
-            done
-
-            cd "$ZIP_DIR"
-            zip -r "../../$ZIP_NAME" ./
-            cd ../..
-          done <<< "$EXTERNAL_REPOS"
-        shell: bash
+          cd zip-root
+          zip -r "../$ZIP_NAME" .
+          cd ..
 
       - name: Download latest two MyCTMLib jars
+        shell: bash
         run: |
-          mkdir jars
+          mkdir -p jars
+
           for TAG in "$TAG1" "$TAG2"; do
             URL="https://github.com/ABKQPO/MyCTMLib/releases/download/${TAG}/MyCTMLib-${TAG}.jar"
-            echo "Downloading $URL"
-            curl -L "$URL" -o jars/MyCTMLib-${TAG}.jar
+            curl -L "$URL" -o "jars/MyCTMLib-${TAG}.jar"
           done
-        shell: bash
+
+      - name: Delete old release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || exit 0
+
+          for asset in $(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name'); do
+            echo "Deleting $asset"
+            gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+          done
 
       - name: Upload files to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             *.zip
             jars/*.jar
